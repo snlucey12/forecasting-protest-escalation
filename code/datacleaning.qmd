@@ -14,7 +14,7 @@ import wbdata
 ```{python}
 # 1) CLEAN ACLED EVENT-LEVEL DATA -> COUNTRY-MONTH PANEL
 
-df = pd.read_csv("ACLEDdatauncleaned.csv")
+df = pd.read_csv("../data/ACLEDdatauncleaned.csv")
 
 latin_america_countries = [
     "Argentina","Bolivia","Brazil","Chile","Colombia","Costa Rica","Cuba",
@@ -107,7 +107,7 @@ panel_model = panel[panel["country"].isin(countries_with_variation)]
 
 ```{python}
 # 2) CLEAN DEMOCRACY INDEX DATA (MIDDLE EAST, YEAR >= 2018)
-df3 = pd.read_csv("democracyindex.csv")
+df3 = pd.read_csv("../data/democracyindex.csv")
 df3.columns = df3.columns.str.strip()
 
 dem = df3[(df3["Year"] >= 2015) & (df3["Year"] <= 2025)].copy()
@@ -144,7 +144,7 @@ print("Missing democracy_index after merge:", int(panel2["democracy_index"].isna
 
 # Convert year_month back to string & save
 panel2["year_month"] = panel2["year_month"].astype(str)
-panel2.to_csv("ACLEDcleaned.csv", index=False)
+panel2.to_csv("../data/ACLEDcleaned.csv", index=False)
 ```
 
 
@@ -152,7 +152,7 @@ panel2.to_csv("ACLEDcleaned.csv", index=False)
 ```{python}
 #4) clean GINI data
 
-gini_wide = pd.read_excel("gini-indexuncleaned.xlsx")
+gini_wide = pd.read_excel("../data/gini-indexuncleaned.xlsx")
 
 # list of Middle Eastern countries
 middle_east_countries = [
@@ -233,7 +233,6 @@ panel3 = panel3.sort_values(["country", "year_month"]).reset_index(drop=True)
 for col in ["inflation", "gdp_growth", "unemployment"]:
     panel3[f"{col}_lag1"] = panel3.groupby("country")[col].shift(1)
 ```
-
 ```{python}
 # 6) MERGE ALL DATA
 panel4 = panel3.merge(
