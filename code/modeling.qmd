@@ -1,0 +1,403 @@
+---
+title: modeling
+format: html
+---
+
+```{python}
+# 1) Setup 
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from sklearn.metrics import roc_auc_score, average_precision_score
+import matplotlib.pyplot as plt
+from sklearn.metrics import precision_recall_curve
+from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
+from sklearn.metrics import roc_auc_score
+```
+
+
+```{python}
+# 2) Load Dataset and define analysis sample
+
+df = pd.read_csv("mergedcleaned.csv")
+
+# Recreate PeriodIndex
+df["year_month"] = pd.PeriodIndex(df["year_month"], freq="M")
+df["year"] = df["year_month"].dt.year
+
+df = df.sort_values(["country", "year_month"]).copy()
+
+# escalation transition: 0 -> 1 violence
+df["escalation_transition"] = (
+    (df["violence_any"] == 0) & (df["violence_any_t1"] == 1)
+).astype(int)
+
+# protest acceleration
+df["protest_count_t_2"] = df.groupby("country")["protest_count"].shift(2)
+df["protest_acceleration"] = (
+    df["protest_count"] - 2*df["protest_count_t_1"] + df["protest_count_t_2"]
+)
+
+# escalation spike: increase in violence intensity
+df["escalation_spike"] = (
+    ((df["violence_any"] == 0) & (df["violence_any_t1"] == 1)) |
+    (
+    (df["violence_count_t1"] >= df["violence_count"] * 1.5)
+)
+).astype(int)
+
+
+print("Spike escalation rate:", round(df["escalation_spike"].mean()*100, 2), "%")
+```
+```{python}
+# 3) Define predictors and outcome
+
+y_name = "escalation_spike"
+
+base_features = [
+    "protest_count",
+    "protest_growth",
+    "recent_violence",
+    "democracy_index",
+    "protest_acceleration",
+    "gdp_growth_lag1",
+    "inflation_lag1",
+    "unemployment_lag1"
+]
+
+macro_cols = ["gdp_growth_lag1", "inflation_lag1", "unemployment_lag1"]
+
+# Only require core variables
+core_needed = [
+    "protest_count",
+    "protest_growth",
+    "recent_violence",
+    "democracy_index",
+    "violence_count",
+    "violence_count_t1",
+    y_name,
+    "country",
+    "year_month",
+    "protest_count_t_1",
+    "protest_count_t_2"
+]
+
+len_before = len(df)
+df = df.dropna(subset=core_needed).copy()
+print("Outcome rate:", y_name, "=", round(df[y_name].mean() * 100, 2), "%")
+
+```
+
+```{python}
+# 4) Split & Demean (train 2015–2022, validate 2023, test 2024–2025)
+
+train = df[(df["year_month"] >= pd.Period("2015-01", freq="M")) &
+           (df["year_month"] <= pd.Period("2022-12", freq="M"))].copy()
+
+valid = df[(df["year_month"] >= pd.Period("2023-01", freq="M")) &
+           (df["year_month"] <= pd.Period("2023-12", freq="M"))].copy()
+
+test  = df[(df["year_month"] >= pd.Period("2024-01", freq="M")) &
+           (df["year_month"] <= pd.Period("2025-12", freq="M"))].copy()
+
+
+# Ensure valid/test countries are seen in train (important for C(country))
+train_countries = set(train["country"])
+valid = valid[valid["country"].isin(train_countries)].copy()
+test  = test[test["country"].isin(train_countries)].copy()
+
+# Missingness indicators for macro variables (created BEFORE demeaning)
+for col in macro_cols:
+    train[col + "_missing"] = train[col].isna().astype(int)
+    valid[col + "_missing"] = valid[col].isna().astype(int)
+    test[col + "_missing"]  = test[col].isna().astype(int)
+
+# Demean using TRAIN means
+train_means = train.groupby("country")[base_features].mean()
+
+def apply_demean(split_df, means_df, cols):
+    out = split_df.copy()
+    for c in cols:
+        out[c + "_dm"] = out[c] - out["country"].map(means_df[c])
+    return out
+
+train = apply_demean(train, train_means, base_features)
+valid = apply_demean(valid, train_means, base_features)
+test  = apply_demean(test,  train_means, base_features)
+
+# Fill missing macro demeaned values with 0 (paired with missing indicators)
+for col in macro_cols:
+    train[col + "_dm"] = train[col + "_dm"].fillna(0)
+    valid[col + "_dm"] = valid[col + "_dm"].fillna(0)
+    test[col + "_dm"]  = test[col + "_dm"].fillna(0)
+
+# Final feature list: demeaned base + missing indicators
+features = [c + "_dm" for c in base_features] + [c + "_missing" for c in macro_cols]
+
+X_train, y_train = train[features], train[y_name]
+X_valid, y_valid = valid[features], valid[y_name]
+X_test,  y_test  = test[features],  test[y_name]
+
+print("Train years:", train["year"].min(), "-", train["year"].max(), "| rows:", len(train), "| transitions:", int(y_train.sum()))
+print("Valid years:", valid["year"].min(), "-", valid["year"].max(), "| rows:", len(valid), "| transitions:", int(y_valid.sum()))
+print("Test years :", test["year"].min(),  "-", test["year"].max(),  "| rows:", len(test),  "| transitions:", int(y_test.sum()))
+
+print("Train transition rate:", round(y_train.mean()*100, 2), "%")
+print("Valid transition rate:", round(y_valid.mean()*100, 2), "%")
+print("Test  transition rate:", round(y_test.mean()*100, 2), "%")
+
+```
+
+```{python}
+# 5) baseline
+
+baseline_features = ["recent_violence_dm"]
+
+X_train_base = train[baseline_features]
+X_valid_base = valid[baseline_features]
+X_test_base  = test[baseline_features]
+
+baseline_model = LogisticRegression(
+    solver="liblinear",
+    class_weight="balanced",
+    max_iter=5000
+)
+
+baseline_model.fit(X_train_base, y_train)
+
+baseline_test_proba = baseline_model.predict_proba(X_test_base)[:,1]
+
+print("Baseline TEST ROC AUC:",
+      round(roc_auc_score(y_test, baseline_test_proba),3))
+
+```
+
+```{python}
+# 6) Hyperparameter tuning for logistic regression (C parameter)
+C_grid = [0.01, 0.1, 1, 5, 10, 50]
+best_auc = -1
+best_C = C_grid[0]
+
+for C_val in C_grid:
+    temp_model = LogisticRegression(
+        solver="liblinear",
+        class_weight="balanced",
+        max_iter=5000,
+        C=C_val
+    )
+    temp_model.fit(X_train, y_train)
+    val_proba = temp_model.predict_proba(X_valid)[:, 1]
+    val_auc = roc_auc_score(y_valid, val_proba)
+
+    print(f"C={C_val} | Validation AUC={val_auc:.3f}")
+
+    if val_auc > best_auc:
+        best_auc = val_auc
+        best_C = C_val
+
+print("\nBest C:", best_C, "| Best VALID AUC:", round(best_auc, 3))
+```
+
+```{python}
+# 7) Fit final escalation model using best_C
+clf = LogisticRegression(
+    solver="liblinear",
+    class_weight="balanced",
+    max_iter=5000,
+    C=best_C
+)
+clf.fit(X_train, y_train)
+
+logit_test_proba = clf.predict_proba(X_test)[:, 1]
+
+print("LOGIT TEST ROC AUC:",
+      round(roc_auc_score(y_test, logit_test_proba), 3))
+print("LOGIT TEST PR AUC:",
+      round(average_precision_score(y_test, logit_test_proba), 3))
+```
+
+```{python}
+# 8) Default XGBoost (baseline)
+xgb = XGBClassifier(
+    n_estimators=300,
+    max_depth=3,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    eval_metric="logloss",
+    random_state=42
+)
+
+xgb.fit(X_train, y_train)
+
+xgb_test_proba_default = xgb.predict_proba(X_test)[:, 1]
+
+print("XGB (default) TEST ROC AUC:",
+      round(roc_auc_score(y_test, xgb_test_proba_default), 3))
+print("XGB (default) TEST PR  AUC:",
+      round(average_precision_score(y_test, xgb_test_proba_default), 3))
+```
+
+```{python}
+# 9) Tune XGBoost on VALID
+param_grid = {
+    "max_depth": [2, 3, 4, 5],
+    "n_estimators": [200, 300, 400, 600],
+    "learning_rate": [0.03, 0.05, 0.1]
+}
+
+best_auc = -np.inf
+best_params = None
+
+for md in param_grid["max_depth"]:
+    for ne in param_grid["n_estimators"]:
+        for lr in param_grid["learning_rate"]:
+            model = XGBClassifier(
+                max_depth=md,
+                n_estimators=ne,
+                learning_rate=lr,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                eval_metric="logloss",
+                random_state=42
+            )
+            model.fit(X_train, y_train)
+
+            valid_proba = model.predict_proba(X_valid)[:, 1]
+            auc = roc_auc_score(y_valid, valid_proba)
+
+            if auc > best_auc:
+                best_auc = auc
+                best_params = {"max_depth": md, "n_estimators": ne, "learning_rate": lr}
+
+print("Best VALID ROC AUC:", round(best_auc, 3))
+print("Best params:", best_params)
+```
+
+```{python}
+# 10) Fit final tuned XGBoost using best_params
+assert best_params is not None
+
+xgb_best = XGBClassifier(
+    **best_params,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    eval_metric="logloss",
+    random_state=42
+)
+
+xgb_best.fit(X_train, y_train)
+
+xgb_test_proba_tuned = xgb_best.predict_proba(X_test)[:, 1]
+
+print("TUNED XGB TEST ROC AUC:",
+      round(roc_auc_score(y_test, xgb_test_proba_tuned), 3))
+print("TUNED XGB TEST PR  AUC:",
+      round(average_precision_score(y_test, xgb_test_proba_tuned), 3))
+```
+
+```{python}
+# 11) Validation / Test performance
+
+proba_valid = clf.predict_proba(X_valid)[:, 1]
+proba_test  = clf.predict_proba(X_test)[:, 1]
+
+print("VALID ROC AUC:", round(roc_auc_score(y_valid, proba_valid), 3))
+print("VALID PR  AUC:", round(average_precision_score(y_valid, proba_valid), 3))
+
+print("TEST ROC AUC:", round(roc_auc_score(y_test, proba_test), 3))
+print("TEST PR  AUC:", round(average_precision_score(y_test, proba_test), 3))
+```
+```{python}
+# 12) comparision of models
+print("Logistic TEST ROC:", round(roc_auc_score(y_test, proba_test),3))
+print("XGB (default) TEST ROC:", round(roc_auc_score(y_test, xgb_test_proba_default),3))
+print("XGB (tuned)   TEST ROC:", round(roc_auc_score(y_test, xgb_test_proba_tuned),3))
+print("Baseline TEST ROC:", round(roc_auc_score(y_test, baseline_test_proba),3))
+```
+
+```{python}
+# 13) Visualization
+# a: distribution of predicted risk
+
+plt.hist(proba_test, bins=30)
+plt.xlabel("Predicted escalation risk")
+plt.ylabel("Number of country-months")
+plt.title("Predicted risk distribution (test set)")
+plt.show()
+```
+
+```{python}
+# 13b: Precision-recall curve
+precision, recall, _ = precision_recall_curve(y_test, proba_test)
+
+plt.plot(recall, precision)
+plt.xlabel("Recall")
+plt.ylabel("Precision")
+plt.title("Precision–Recall Curve (Logistic, test set)")
+plt.show()
+```
+
+```{python}
+# 13c) calibration plot
+
+results = test.copy()
+
+results["risk"] = proba_test
+results["actual"] = y_test.values
+
+results["risk_bin"] = pd.qcut(results["risk"], 10, duplicates="drop")
+
+calibration = results.groupby("risk_bin").agg(
+    avg_predicted=("risk", "mean"),
+    actual_rate=("actual", "mean")
+).reset_index()
+
+plt.plot(calibration["avg_predicted"],
+         calibration["actual_rate"],
+         marker="o")
+
+plt.plot([0,1],[0,1], linestyle="--")
+plt.xlabel("Average Predicted Risk")
+plt.ylabel("Actual Escalation Rate")
+plt.title("Calibration Plot")
+plt.show()
+```
+
+```{python}
+# 14) False positive analysis
+cutoff = np.quantile(results["risk"], 0.90)  # top 10%
+false_positives = results[(results["risk"] >= cutoff) & (results["actual"] == 0)] \
+    .sort_values("risk", ascending=False)
+
+print("Cutoff used:", cutoff)
+false_positives.head(20)
+```
+
+```{python}
+# 15) Feature importance for xgboost
+importance = pd.Series(
+    xgb_best.feature_importances_,
+    index=X_train.columns
+).sort_values(ascending=False)
+
+importance.head(10).plot(kind="bar")
+plt.title("XGBoost Feature Importance (tuned)")
+plt.ylabel("Importance")
+plt.show()
+```
+```{python}
+#9: save outputs
+results.to_csv("forecast_results_2015_2025.csv", index=False)
+```
+
+```{python}
+print("Overall spike rate:", round(df["escalation_spike"].mean()*100, 2), "%")
+print("Train spike rate:", round(y_train.mean()*100, 2), "%")
+print("Test spike rate:", round(y_test.mean()*100, 2), "%")
+```
+
+
+---
