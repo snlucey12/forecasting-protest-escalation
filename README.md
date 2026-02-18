@@ -17,13 +17,6 @@ This project uses the following datasets:
 
 ---
 
-## Important Note on Data
-
-
-
-To run the project:
-
-
 ## Author
 
 Sonia Lucey  
