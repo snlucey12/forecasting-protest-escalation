@@ -240,7 +240,7 @@ panel4 = panel3.merge(
     on=["country", "year"],
     how="left"
 )
-panel4.to_csv("mergedcleaned.csv", index=False)
+panel4.to_csv("../data/mergedcleaned.csv", index=False)
 print("Saved: mergedcleaned.csv")
 
 ```
