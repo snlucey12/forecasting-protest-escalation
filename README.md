@@ -6,25 +6,10 @@ The project builds a country-month panel dataset using ACLED event data and macr
 
 ---
 
-## Repository Structure
-
-code/  
-    Data cleaning scripts and modeling notebooks  
-
-data/  
-    Raw input datasets (not included in repo if large)  
-
-output/  
-    Model results, predictions, and processed files  
-
----
-
-## Data Sources
-
 This project uses the following datasets:
 
 - **ACLED Event Data** (2015–2025)  
-  https://acleddata.com/
+  https://acleddata.com/. Not included in the repo due to size.
 
 - **Democracy Index data**
 
@@ -34,21 +19,10 @@ This project uses the following datasets:
 
 ## Important Note on Data
 
-Large raw datasets are not included in this repository.
+
 
 To run the project:
 
-1. Download ACLED data and save as  
-   `data/ACLEDdatauncleaned.csv`
----
-
-## How to Run
-
-1. Install required Python packages  
-2. Run data cleaning scripts in `code/`
-3. Run modeling scripts to generate outputs in `output/`
-
----
 
 ## Author
 
