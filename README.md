@@ -6,14 +6,13 @@ The project builds a country-month panel dataset using ACLED event data and macr
 
 ---
 
-This project uses the following datasets:
+This project relies on three datasets:
 
-- **ACLED Event Data** (2015–2025)  
-  https://acleddata.com/. Not included in the repo due to size.
+ACLED Event Data (2015–2025) – not included in the repository due to size and licensing; download from https://acleddata.com/
 
-- **Democracy Index data**
+Democracy Index data
 
-- **GINI inequality data**
+GINI inequality data
 
 ---
 
