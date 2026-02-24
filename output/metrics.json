@@ -1,0 +1,26 @@
+{
+  "y_name":"escalation_spike",
+  "overall_rate":0.2716627635,
+  "train_rows":916,
+  "valid_rows":184,
+  "test_rows":181,
+  "train_rate":0.2751091703,
+  "valid_rate":0.25,
+  "test_rate":0.2762430939,
+  "baseline_test_roc_auc":0.5776335878,
+  "logit_valid_roc_auc":0.5305608066,
+  "logit_valid_pr_auc":0.2690368417,
+  "logit_test_roc_auc":0.5848854962,
+  "logit_test_pr_auc":0.3506171844,
+  "xgb_default_test_roc_auc":0.6813740458,
+  "xgb_default_test_pr_auc":0.5646867756,
+  "xgb_tuned_valid_roc_auc":0.7194391934,
+  "xgb_tuned_test_roc_auc":0.6728244275,
+  "xgb_tuned_test_pr_auc":0.5710975443,
+  "best_logit_C":0.1,
+  "best_xgb_params":{
+    "max_depth":4,
+    "n_estimators":300,
+    "learning_rate":0.05
+  }
+}

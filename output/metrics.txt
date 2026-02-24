@@ -1,0 +1,20 @@
+y_name: escalation_spike
+overall_rate: 0.2716627634660422
+train_rows: 916
+valid_rows: 184
+test_rows: 181
+train_rate: 0.27510917030567683
+valid_rate: 0.25
+test_rate: 0.27624309392265195
+baseline_test_roc_auc: 0.5776335877862595
+logit_valid_roc_auc: 0.5305608065532451
+logit_valid_pr_auc: 0.2690368417276451
+logit_test_roc_auc: 0.5848854961832061
+logit_test_pr_auc: 0.3506171843868995
+xgb_default_test_roc_auc: 0.6813740458015267
+xgb_default_test_pr_auc: 0.5646867755544639
+xgb_tuned_valid_roc_auc: 0.7194391934467549
+xgb_tuned_test_roc_auc: 0.672824427480916
+xgb_tuned_test_pr_auc: 0.5710975442796016
+best_logit_C: 0.1
+best_xgb_params: {'max_depth': 4, 'n_estimators': 300, 'learning_rate': 0.05}
