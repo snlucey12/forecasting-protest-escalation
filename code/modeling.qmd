@@ -21,7 +21,7 @@ from sklearn.metrics import roc_auc_score
 ```{python}
 # 2) Load Dataset and define analysis sample
 
-df = pd.read_csv("mergedcleaned.csv")
+df = pd.read_csv("../data/mergedcleaned.csv")
 
 # Recreate PeriodIndex
 df["year_month"] = pd.PeriodIndex(df["year_month"], freq="M")
@@ -390,7 +390,8 @@ plt.show()
 ```
 ```{python}
 #9: save outputs
-results.to_csv("forecast_results_2015_2025.csv", index=False)
+results.to_csv("../output/forecast_results_2015_2025.csv", index=False)
+
 ```
 
 ```{python}
@@ -401,3 +402,99 @@ print("Test spike rate:", round(y_test.mean()*100, 2), "%")
 
 
 ---
+
+```{python}
+# - SAVE PLOTS + OUTPUT TABLES 
+
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve
+
+# 0) Make sure output folder exists
+OUTDIR = "../output"
+
+# 1) Save the main results table
+results.to_csv(os.path.join(OUTDIR, "forecast_results_2015_2025.csv"), index=False)
+
+# 2) Save performance metrics
+metrics = {
+    "y_name": y_name,
+    "overall_rate": float(df[y_name].mean()),
+    "train_rows": int(len(train)),
+    "valid_rows": int(len(valid)),
+    "test_rows": int(len(test)),
+    "train_rate": float(y_train.mean()),
+    "valid_rate": float(y_valid.mean()),
+    "test_rate": float(y_test.mean()),
+    "baseline_test_roc_auc": float(roc_auc_score(y_test, baseline_test_proba)),
+    "logit_valid_roc_auc": float(roc_auc_score(y_valid, proba_valid)),
+    "logit_valid_pr_auc": float(average_precision_score(y_valid, proba_valid)),
+    "logit_test_roc_auc": float(roc_auc_score(y_test, proba_test)),
+    "logit_test_pr_auc": float(average_precision_score(y_test, proba_test)),
+    "xgb_default_test_roc_auc": float(roc_auc_score(y_test, xgb_test_proba_default)),
+    "xgb_default_test_pr_auc": float(average_precision_score(y_test, xgb_test_proba_default)),
+    "xgb_tuned_valid_roc_auc": float(best_auc),  # from your tuning loop
+    "xgb_tuned_test_roc_auc": float(roc_auc_score(y_test, xgb_test_proba_tuned)),
+    "xgb_tuned_test_pr_auc": float(average_precision_score(y_test, xgb_test_proba_tuned)),
+    "best_logit_C": float(best_C),
+    "best_xgb_params": best_params
+}
+pd.Series(metrics).to_json(os.path.join(OUTDIR, "metrics.json"), indent=2)
+with open(os.path.join(OUTDIR, "metrics.txt"), "w") as f:
+    for k, v in metrics.items():
+        f.write(f"{k}: {v}\n")
+
+# 3) Save plots (PNG)
+# NOTE: use fresh figures to avoid saving the wrong thing
+
+# 3a) Risk distribution (Logit, test)
+plt.figure()
+plt.hist(proba_test, bins=30)
+plt.xlabel("Predicted escalation risk")
+plt.ylabel("Number of country-months")
+plt.title("Predicted risk distribution (test set)")
+plt.savefig(os.path.join(OUTDIR, "risk_distribution_test.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# 3b) Precision–Recall curve (Logit, test)
+precision, recall, _ = precision_recall_curve(y_test, proba_test)
+plt.figure()
+plt.plot(recall, precision)
+plt.xlabel("Recall")
+plt.ylabel("Precision")
+plt.title("Precision–Recall Curve (Logistic, test set)")
+plt.savefig(os.path.join(OUTDIR, "pr_curve_logit_test.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# 3c) Calibration plot (uses calibration DataFrame you created)
+calibration = results.groupby("risk_bin").agg(avg_predicted=("risk","mean"), actual_rate=("actual","mean")).reset_index()
+
+plt.figure()
+plt.plot(calibration["avg_predicted"], calibration["actual_rate"], marker="o")
+plt.plot([0, 1], [0, 1], linestyle="--")
+plt.xlabel("Average Predicted Risk")
+plt.ylabel("Actual Escalation Rate")
+plt.title("Calibration Plot (test set)")
+plt.savefig(os.path.join(OUTDIR, "calibration_plot_test.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# 3d) XGBoost feature importance (bar plot)
+importance = pd.Series(xgb_best.feature_importances_, index=X_train.columns).sort_values(ascending=False)
+importance.to_csv(os.path.join(OUTDIR, "xgb_feature_importance.csv"), header=["importance"])
+
+plt.figure()
+importance.head(10).plot(kind="bar")
+plt.title("XGBoost Feature Importance (tuned)")
+plt.ylabel("Importance")
+plt.savefig(os.path.join(OUTDIR, "xgb_feature_importance_top10.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# 4) Save top false positives (top 10% risk but actual=0)
+cutoff = results["risk"].quantile(0.90)
+false_positives = results[(results["risk"] >= cutoff) & (results["actual"] == 0)].sort_values("risk", ascending=False)
+false_positives.to_csv(os.path.join(OUTDIR, "false_positives_top10pct.csv"), index=False)
+
+print("Saved outputs to:", os.path.abspath(OUTDIR))
+print("Files:", sorted(os.listdir(OUTDIR)))
+
