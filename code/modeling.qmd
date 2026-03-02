@@ -11,12 +11,15 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
+import geopandas as gpd
+import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, average_precision_score
 import matplotlib.pyplot as plt
 from sklearn.metrics import precision_recall_curve
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 from sklearn.metrics import roc_auc_score
+from matplotlib.colors import Normalize
 ```
 
 
@@ -239,7 +242,9 @@ features = (
     region_dummies
 )
 
-
+train[region_dummies] = train[region_dummies].astype(int)
+valid[region_dummies] = valid[region_dummies].astype(int)
+test[region_dummies]  = test[region_dummies].astype(int)
 
 X_train, y_train = train[features], train[y_name]
 X_valid, y_valid = valid[features], valid[y_name]
@@ -326,13 +331,19 @@ print("LOGIT TEST PR AUC:",
 ```
 ```{python}
 # 8) Inference-focused logistic regression with clustered SEs
+
 if "region" in train.columns:
     formula = (
         "escalation ~ violence_count_lag1 + violence_count_lag2 + violence_rolling3 "
         "+ protest_count + democracy_index + region_violence_mean + C(region)"
     )
 else:
-    region_terms = " + ".join([c for c in train.columns if c.startswith("region_")])
+    # region already one-hot encoded; include ONLY the dummy columns (not region_violence_mean)
+    region_terms = " + ".join([
+        c for c in train.columns
+        if c.startswith("region_") and c != "region_violence_mean"
+    ])
+
     formula = (
         "escalation ~ violence_count_lag1 + violence_count_lag2 + violence_rolling3 "
         "+ protest_count + democracy_index + region_violence_mean"
@@ -525,10 +536,190 @@ results.to_csv("../output/forecast_results_2015_2025.csv", index=False)
 
 ```
 
+```{python}
+# 18) Sub-national risk (country)
+# Year FE
+if "year" not in train.columns:
+    train["year"] = train["year_month"].dt.year
+
+# Base formula pieces (temporal + core covariates + regional spillover)
+base = (
+    "escalation ~ "
+    "violence_count_lag1 + violence_count_lag2 + violence_rolling3 "
+    "+ protest_count + democracy_index + region_violence_mean"
+)
+
+# Add region controls (either C(region) or one-hot region_* dummies)
+if "region" in train.columns:
+    # Region fixed effects
+    region_part = " + C(region)"
+else:
+    # Region already one-hot encoded as region_* columns; exclude region_violence_mean
+    region_terms = " + ".join([
+        c for c in train.columns
+        if c.startswith("region_") and c != "region_violence_mean"
+    ])
+    region_part = (" + " + region_terms) if region_terms else ""
+
+# Add time fixed effects - Year FE
+time_part = " + C(year)"
+
+# Final formula
+formula = base + region_part + time_part
+print("FORMULA:\n", formula)
+
+# Fit with country-clustered SEs (handles temporal dependence within country)
+logit_inference = smf.logit(formula, data=train).fit(
+    cov_type="cluster",
+    cov_kwds={"groups": train["country"]}
+)
+
+print(logit_inference.summary())
+
+```
+
+```{python}
+# 19) Sub-national granularity (region)
+# Cluster by region not country
+import numpy as np
+
+region_dummy_cols = [c for c in train.columns if c.startswith("region_")]
+
+# exclude the spillover feature if it's named like region_violence_mean
+region_dummy_cols = [c for c in region_dummy_cols if c != "region_violence_mean"]
+
+# build region label = name of the max dummy column
+train["region"] = (
+    train[region_dummy_cols]
+    .idxmax(axis=1)
+    .str.replace("region_", "", regex=False)
+)
+
+# now cluster by region
+logit_region_cluster = smf.logit(formula, data=train).fit(
+    cov_type="cluster",
+    cov_kwds={"groups": train["region"]}
+)
+
+print(logit_region_cluster.summary())
+```
+
+```{python}
+# 20) Sub-national granularity (grid-cell-month model)
+
+# 1) Grid definition (0.5° ≈ ~50km; can try .25)
+grid_size = 0.5
+
+df = df.dropna(subset=["latitude", "longitude", "event_date"]).copy()
+
+df["lat_grid"] = np.floor(df["latitude"] / grid_size) * grid_size
+df["lon_grid"] = np.floor(df["longitude"] / grid_size) * grid_size
+
+df["cell_id"] = (
+    df["country"].astype(str) + "_" +
+    df["lat_grid"].astype(str) + "_" +
+    df["lon_grid"].astype(str)
+)
+
+# 2) Cell-month aggregation using event flags
+df["year_month"] = df["event_date"].dt.to_period("M")
+
+cell_month = (
+    df.groupby(["cell_id", "country", "year_month"], as_index=False)
+      .agg(
+          protest_count=("is_protest", "sum"),
+          protest_any=("is_protest", "max"),
+          violence_count=("is_escalation_event", "sum"),
+          violence_any=("is_escalation_event", "max")
+      )
+)
+
+# Escalation: violence appears next month in the SAME cell (conditional on protests)
+cell_month = cell_month.sort_values(["cell_id", "year_month"]).copy()
+cell_month["violence_any_t1"] = cell_month.groupby("cell_id")["violence_any"].shift(-1)
+cell_month["escalation"] = ((cell_month["protest_any"] == 1) & (cell_month["violence_any_t1"] == 1)).astype(int)
+
+# restrict to protest months (matches your country-month design)
+cell_month = cell_month[cell_month["protest_any"] == 1].copy()
+
+# Time fixed effects (absorbs common shocks)
+cell_month["year"] = cell_month["year_month"].dt.year.astype(int)
+
+# Inference-focused logistic regression with clustered SEs by spatial unit
+formula = "escalation ~ protest_count + violence_count + C(year)"
+
+logit_cell = smf.logit(formula, data=cell_month).fit(
+    cov_type="cluster",
+    cov_kwds={"groups": cell_month["cell_id"]}
+)
+
+print(formula)
+print(logit_cell.summary())
+```
+
+```{python}
+# 21) Sub-national risk map (grid-cell-month inference)
+
+# 1) Load Natural Earth countries (built-in via URL)
+url = "https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip"
+countries = gpd.read_file(url)
+
+# Keep Latin America by bounding box
+latam = countries.cx[-120:-30, -60:35].copy()
+
+# Prepare risk data
+cm_plot = cm_map.copy()
+
+if "risk_hat" not in cm_plot.columns:
+    cm_plot["risk_hat"] = logit_cell.predict(cm_plot)
+
+cm_plot = cm_plot.dropna(subset=["risk_hat", "lat_grid", "lon_grid"])
+
+# Plot
+fig, ax = plt.subplots(figsize=(9, 7), dpi=300)
+
+# Country borders
+latam.boundary.plot(ax=ax, linewidth=0.7, color="black")
+
+# Risk heat points
+norm = Normalize(vmin=0, vmax=1)
+
+sc = ax.scatter(
+    cm_plot["lon_grid"],
+    cm_plot["lat_grid"],
+    c=cm_plot["risk_hat"],
+    cmap="RdYlGn_r",   # green → yellow → red
+    norm=norm,
+    s=28,
+    alpha=0.9,
+    edgecolors="none"
+)
+
+cbar = plt.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
+cbar.set_label("Predicted probability of escalation (t+1)")
+
+ax.set_xlim(-120, -30)
+ax.set_ylim(-60, 35)
+
+ax.set_xlabel("Longitude")
+ax.set_ylabel("Latitude")
+ax.set_title("Predicted Escalation Risk by Sub-National Grid Cell")
+
+plt.tight_layout()
+plt.savefig("risk_map_with_country_borders.png", bbox_inches="tight")
+plt.show()
+
+# Save to output folder
+OUTDIR = "../output"
+plt.savefig(
+    os.path.join(OUTDIR, "risk_map_gridcell.png"),
+    dpi=300,
+    bbox_inches="tight"
+)
+```
 
 ```{python}
 # - SAVE PLOTS + OUTPUT TABLES 
-
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -620,4 +811,5 @@ false_positives.to_csv(os.path.join(OUTDIR, "false_positives_top10pct.csv"), ind
 
 print("Saved outputs to:", os.path.abspath(OUTDIR))
 print("Files:", sorted(os.listdir(OUTDIR)))
+
 
