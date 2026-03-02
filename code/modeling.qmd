@@ -1,6 +1,8 @@
 ---
 title: modeling
 format: html
+execute:
+  python: "C:/Users/sonia/stat4915/4915env/Scripts/python.exe"
 ---
 
 ```{python}
@@ -23,38 +25,85 @@ from sklearn.metrics import roc_auc_score
 
 df = pd.read_csv("../data/mergedcleaned.csv")
 
-# Recreate PeriodIndex
 df["year_month"] = pd.PeriodIndex(df["year_month"], freq="M")
 df["year"] = df["year_month"].dt.year
 
 df = df.sort_values(["country", "year_month"]).copy()
 
-# escalation transition: 0 -> 1 violence
-df["escalation_transition"] = (
-    (df["violence_any"] == 0) & (df["violence_any_t1"] == 1)
-).astype(int)
+# Fill key series before creating lags/rolling
+df["violence_count"] = df["violence_count"].fillna(0)
+df["violence_any"]   = df["violence_any"].fillna(0)
 
-# protest acceleration
-df["protest_count_t_2"] = df.groupby("country")["protest_count"].shift(2)
-df["protest_acceleration"] = (
-    df["protest_count"] - 2*df["protest_count_t_1"] + df["protest_count_t_2"]
+# ------------------------------
+# TEMPORAL DEPENDENCE FEATURES
+# ------------------------------
+df["violence_count_lag1"] = df.groupby("country")["violence_count"].shift(1)
+df["violence_count_lag2"] = df.groupby("country")["violence_count"].shift(2)
+
+df["violence_rolling3"] = (
+    df.groupby("country")["violence_count"]
+      .rolling(window=3, min_periods=1)
+      .mean()
+      .reset_index(level=0, drop=True)
 )
 
-# escalation spike: increase in violence intensity
-df["escalation_spike"] = (
-    ((df["violence_any"] == 0) & (df["violence_any_t1"] == 1)) |
-    (
-    (df["violence_count_t1"] >= df["violence_count"] * 1.5)
+# ------------------------------
+# GEOSPATIAL FEATURES
+# ------------------------------
+region_map = {
+
+    # Southern Cone
+    "Argentina": "SouthernCone",
+    "Chile": "SouthernCone",
+    "Uruguay": "SouthernCone",
+    "Paraguay": "SouthernCone",
+
+    # Andean
+    "Colombia": "Andean",
+    "Peru": "Andean",
+    "Ecuador": "Andean",
+    "Bolivia": "Andean",
+    "Venezuela": "Andean",
+
+    # Brazil (large & distinct)
+    "Brazil": "Brazil",
+
+    # Central America (Northern Triangle + neighbors)
+    "Guatemala": "CentralAmerica",
+    "Honduras": "CentralAmerica",
+    "El Salvador": "CentralAmerica",
+    "Nicaragua": "CentralAmerica",
+    "Costa Rica": "CentralAmerica",
+    "Panama": "CentralAmerica"
+}
+
+df["region"] = df["country"].map(region_map).fillna("Other")
+
+df["region_violence_mean"] = (
+    df.groupby(["region", "year_month"])["violence_count"]
+      .transform("mean")
 )
-).astype(int)
 
+# Only drop rows missing essential panel keys (NOT everything)
+df = df.dropna(subset=["country", "year_month"]).copy()
 
-print("Spike escalation rate:", round(df["escalation_spike"].mean()*100, 2), "%")
+print("After feature engineering:", df.shape)
+print(df["region"].value_counts().head(10))
 ```
+
+
 ```{python}
 # 3) Define predictors and outcome
 
-y_name = "escalation_spike"
+# Restrict to protest months (your project framing)
+df = df[df["protest_count"] > 0].copy()
+
+# Define escalation as "violence turns on next month" (transition)
+# (If you instead want "any violence next month", tell me and we’ll adjust.)
+df["violence_count_t1"] = df["violence_count_t1"].fillna(0)
+df["escalation"] = (df["violence_count_t1"] >= 1.25 * df["violence_count"]).astype(int)
+
+y_name = "escalation"
 
 base_features = [
     "protest_count",
@@ -69,25 +118,24 @@ base_features = [
 
 macro_cols = ["gdp_growth_lag1", "inflation_lag1", "unemployment_lag1"]
 
-# Only require core variables
+extra_features = [
+    "violence_count_lag1",
+    "violence_count_lag2",
+    "violence_rolling3",
+    "region_violence_mean"
+]
+
+# IMPORTANT: do NOT dropna on everything; macro can be missing and you already have _missing flags
 core_needed = [
-    "protest_count",
-    "protest_growth",
-    "recent_violence",
-    "democracy_index",
-    "violence_count",
-    "violence_count_t1",
-    y_name,
-    "country",
-    "year_month",
-    "protest_count_t_1",
-    "protest_count_t_2"
+    "country", "year_month", y_name, "protest_count", "violence_any", "violence_count_t1",
+    "violence_count_lag1", "violence_count_lag2", "violence_rolling3", "region_violence_mean", "region"
 ]
 
 len_before = len(df)
 df = df.dropna(subset=core_needed).copy()
-print("Outcome rate:", y_name, "=", round(df[y_name].mean() * 100, 2), "%")
 
+print("Rows before/after:", len_before, "->", len(df))
+print("Outcome rate:", y_name, "=", round(df[y_name].mean() * 100, 2), "%")
 ```
 
 ```{python}
@@ -133,8 +181,34 @@ for col in macro_cols:
     valid[col + "_dm"] = valid[col + "_dm"].fillna(0)
     test[col + "_dm"]  = test[col + "_dm"].fillna(0)
 
-# Final feature list: demeaned base + missing indicators
+## Final feature list: demeaned base + missing indicators
 features = [c + "_dm" for c in base_features] + [c + "_missing" for c in macro_cols]
+
+# ADD temporal + geospatial features
+# (These should already exist as columns from your feature engineering step)
+extra_features = [
+    "violence_count_lag1",
+    "violence_count_lag2",
+    "violence_rolling3",
+    "region_violence_mean"
+]
+
+# One-hot encode region for sklearn (do this BEFORE train/valid/test split if possible)
+df = pd.get_dummies(df, columns=["region"], drop_first=True)
+region_dummies = [c for c in df.columns if c.startswith("region_")]
+
+# Append extras + region fixed effects
+features = features + extra_features + region_dummies
+
+# Final feature list for sklearn
+dm_features = [f"{c}_dm" for c in base_features]  # whatever you already do
+final_features = dm_features + extra_features
+
+# One-hot encode region for sklearn
+df = pd.get_dummies(df, columns=["region"], drop_first=True)
+region_dummies = [c for c in df.columns if c.startswith("region_")]
+
+final_features = final_features + region_dummies
 
 X_train, y_train = train[features], train[y_name]
 X_valid, y_valid = valid[features], valid[y_name]
@@ -216,10 +290,29 @@ print("LOGIT TEST ROC AUC:",
       round(roc_auc_score(y_test, logit_test_proba), 3))
 print("LOGIT TEST PR AUC:",
       round(average_precision_score(y_test, logit_test_proba), 3))
+
+
+# 8) Inference-focused logistic regression with clustered SEs
+
+
+logit_inference = smf.logit(
+    "escalation ~ violence_lag1 + violence_lag2 + violence_rolling3 \
+     + protest_count + democracy_index + region_violence_mean + C(region)",
+    data=train
+).fit(
+    cov_type="cluster",
+    cov_kwds={"groups": train["country"]}
+)
+
+print(logit_inference.summary())
+
+cov_type="cluster"
+cov_kwds={"groups": train["country"]}
 ```
 
+
 ```{python}
-# 8) Default XGBoost (baseline)
+# 9) Default XGBoost (baseline)
 xgb = XGBClassifier(
     n_estimators=300,
     max_depth=3,
@@ -241,7 +334,7 @@ print("XGB (default) TEST PR  AUC:",
 ```
 
 ```{python}
-# 9) Tune XGBoost on VALID
+# 10) Tune XGBoost on VALID
 param_grid = {
     "max_depth": [2, 3, 4, 5],
     "n_estimators": [200, 300, 400, 600],
@@ -277,7 +370,7 @@ print("Best params:", best_params)
 ```
 
 ```{python}
-# 10) Fit final tuned XGBoost using best_params
+# 11) Fit final tuned XGBoost using best_params
 assert best_params is not None
 
 xgb_best = XGBClassifier(
@@ -299,7 +392,7 @@ print("TUNED XGB TEST PR  AUC:",
 ```
 
 ```{python}
-# 11) Validation / Test performance
+# 12) Validation / Test performance
 
 proba_valid = clf.predict_proba(X_valid)[:, 1]
 proba_test  = clf.predict_proba(X_test)[:, 1]
@@ -311,7 +404,7 @@ print("TEST ROC AUC:", round(roc_auc_score(y_test, proba_test), 3))
 print("TEST PR  AUC:", round(average_precision_score(y_test, proba_test), 3))
 ```
 ```{python}
-# 12) comparision of models
+# 13) comparision of models
 print("Logistic TEST ROC:", round(roc_auc_score(y_test, proba_test),3))
 print("XGB (default) TEST ROC:", round(roc_auc_score(y_test, xgb_test_proba_default),3))
 print("XGB (tuned)   TEST ROC:", round(roc_auc_score(y_test, xgb_test_proba_tuned),3))
@@ -319,7 +412,7 @@ print("Baseline TEST ROC:", round(roc_auc_score(y_test, baseline_test_proba),3))
 ```
 
 ```{python}
-# 13) Visualization
+# 14) Visualization
 # a: distribution of predicted risk
 
 plt.hist(proba_test, bins=30)
@@ -330,7 +423,7 @@ plt.show()
 ```
 
 ```{python}
-# 13b: Precision-recall curve
+# 14b: Precision-recall curve
 precision, recall, _ = precision_recall_curve(y_test, proba_test)
 
 plt.plot(recall, precision)
@@ -341,7 +434,7 @@ plt.show()
 ```
 
 ```{python}
-# 13c) calibration plot
+# 14c) calibration plot
 
 results = test.copy()
 
@@ -367,7 +460,7 @@ plt.show()
 ```
 
 ```{python}
-# 14) False positive analysis
+# 15) False positive analysis
 cutoff = np.quantile(results["risk"], 0.90)  # top 10%
 false_positives = results[(results["risk"] >= cutoff) & (results["actual"] == 0)] \
     .sort_values("risk", ascending=False)
@@ -377,7 +470,7 @@ false_positives.head(20)
 ```
 
 ```{python}
-# 15) Feature importance for xgboost
+# 16) Feature importance for xgboost
 importance = pd.Series(
     xgb_best.feature_importances_,
     index=X_train.columns
@@ -389,7 +482,7 @@ plt.ylabel("Importance")
 plt.show()
 ```
 ```{python}
-#9: save outputs
+# 17): save outputs
 results.to_csv("../output/forecast_results_2015_2025.csv", index=False)
 
 ```
