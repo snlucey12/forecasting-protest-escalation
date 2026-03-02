@@ -106,7 +106,7 @@ panel_model = panel[panel["country"].isin(countries_with_variation)]
 ```
 
 ```{python}
-# 2) CLEAN DEMOCRACY INDEX DATA (MIDDLE EAST, YEAR >= 2018)
+# 2) CLEAN DEMOCRACY INDEX DATA (LATIN AMERICA YEAR >= 2018)
 df3 = pd.read_csv("../data/democracyindex.csv")
 df3.columns = df3.columns.str.strip()
 
@@ -154,12 +154,6 @@ panel2.to_csv("../data/ACLEDcleaned.csv", index=False)
 
 gini_wide = pd.read_excel("../data/gini-indexuncleaned.xlsx")
 
-# list of Middle Eastern countries
-middle_east_countries = [
-    "Bahrain","Iran, Islamic Rep.","Iraq","Israel","Jordan","Kuwait",
-    "Lebanon","Oman","Qatar","Saudi Arabia","Syrian Arab Republic",
-    "United Arab Emirates","Yemen, Rep.","West Bank and Gaza"
-]
 
 # keep only Middle East
 gini_wide = gini_wide[gini_wide["Country Name"].isin(latin_america_countries)].copy()
@@ -242,7 +236,28 @@ panel4 = panel3.merge(
 )
 panel4.to_csv("../data/mergedcleaned.csv", index=False)
 print("Saved: mergedcleaned.csv")
+```
 
+
+```{python}
+# Save event-level data with coordinates for sub-national modeling
+df_event_level = df[[
+    "event_date",
+    "year_month",
+    "country",
+    "latitude",
+    "longitude",
+    "event_type",
+    "fatalities",
+    "is_protest",
+    "is_escalation_event"
+]].copy()
+
+df_event_level.to_csv("../data/ACLED_event_level_with_coords.csv", index=False)
+
+print("Saved event-level data with coordinates.")
 ```
 
 ## SL note: use dataset "mergedcleaned.csv" for analysis in later sections.
+
+## SL note: use "ACLED_event_level_with_coords.csv" for any sub-national modeling or geospatial analysis.
