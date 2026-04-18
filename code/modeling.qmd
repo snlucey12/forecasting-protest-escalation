@@ -104,7 +104,10 @@ df = df[df["protest_count"] > 0].copy()
 # Define escalation as "violence turns on next month" (transition)
 # (If you instead want "any violence next month", tell me and we’ll adjust.)
 df["violence_count_t1"] = df["violence_count_t1"].fillna(0)
-df["escalation"] = (df["violence_count_t1"] >= 1.25 * df["violence_count"]).astype(int)
+df["escalation"] = (
+    ((df["violence_count"] == 0) & (df["violence_count_t1"] > 0)) |
+    (df["violence_count_t1"] >= 1.5 * df["violence_count"])
+).astype(int)
 
 y_name = "escalation"
 
@@ -607,88 +610,102 @@ print(logit_region_cluster.summary())
 ```{python}
 # 20) Sub-national granularity (grid-cell-month model)
 
-# 1) Grid definition (0.5° ≈ ~50km; can try .25)
+df_event_level = pd.read_csv("../data/ACLED_event_level_with_coords.csv")
+df_event_level["event_date"] = pd.to_datetime(df_event_level["event_date"], errors="coerce")
+
+# Clean event-level df
+df_events = df_event_level.dropna(subset=["latitude", "longitude", "event_date"]).copy()
+
+# Grid definition
 grid_size = 0.5
+df_events["lat_grid"] = np.floor(df_events["latitude"] / grid_size) * grid_size
+df_events["lon_grid"] = np.floor(df_events["longitude"] / grid_size) * grid_size
 
-df = df.dropna(subset=["latitude", "longitude", "event_date"]).copy()
-
-df["lat_grid"] = np.floor(df["latitude"] / grid_size) * grid_size
-df["lon_grid"] = np.floor(df["longitude"] / grid_size) * grid_size
-
-df["cell_id"] = (
-    df["country"].astype(str) + "_" +
-    df["lat_grid"].astype(str) + "_" +
-    df["lon_grid"].astype(str)
+# Cell id (must exist BEFORE groupby)
+df_events["cell_id"] = (
+    df_events["country"].astype(str) + "_" +
+    df_events["lat_grid"].astype(str) + "_" +
+    df_events["lon_grid"].astype(str)
 )
 
-# 2) Cell-month aggregation using event flags
-df["year_month"] = df["event_date"].dt.to_period("M")
+# Year-month
+df_events["year_month"] = df_events["event_date"].dt.to_period("M")
 
+# Aggregate to cell-month (keep lat/lon)
 cell_month = (
-    df.groupby(["cell_id", "country", "year_month"], as_index=False)
-      .agg(
-          protest_count=("is_protest", "sum"),
-          protest_any=("is_protest", "max"),
-          violence_count=("is_escalation_event", "sum"),
-          violence_any=("is_escalation_event", "max")
-      )
+    df_events.groupby(["cell_id", "country", "lat_grid", "lon_grid", "year_month"], as_index=False)
+    .agg(
+        protest_count=("is_protest", "sum"),
+        protest_any=("is_protest", "max"),
+        violence_count=("is_escalation_event", "sum"),
+        violence_any=("is_escalation_event", "max")
+    )
 )
 
-# Escalation: violence appears next month in the SAME cell (conditional on protests)
+# Escalation in next month within same cell
 cell_month = cell_month.sort_values(["cell_id", "year_month"]).copy()
 cell_month["violence_any_t1"] = cell_month.groupby("cell_id")["violence_any"].shift(-1)
 cell_month["escalation"] = ((cell_month["protest_any"] == 1) & (cell_month["violence_any_t1"] == 1)).astype(int)
 
-# restrict to protest months (matches your country-month design)
+# Restrict to protest months
 cell_month = cell_month[cell_month["protest_any"] == 1].copy()
 
-# Time fixed effects (absorbs common shocks)
+# Year FE
 cell_month["year"] = cell_month["year_month"].dt.year.astype(int)
 
-# Inference-focused logistic regression with clustered SEs by spatial unit
-formula = "escalation ~ protest_count + violence_count + C(year)"
+print(cell_month.columns)
+print(cell_month.shape)
 
-logit_cell = smf.logit(formula, data=cell_month).fit(
+formula_cell = "escalation ~ protest_count + violence_count + C(year)"
+
+logit_cell = smf.logit(formula_cell, data=cell_month).fit(
     cov_type="cluster",
     cov_kwds={"groups": cell_month["cell_id"]}
 )
 
-print(formula)
+print(formula_cell)
 print(logit_cell.summary())
 ```
 
 ```{python}
 # 21) Sub-national risk map (grid-cell-month inference)
 
-# 1) Load Natural Earth countries (built-in via URL)
+import os
+from matplotlib.colors import Normalize
+
+# 1) Load Natural Earth countries
 url = "https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip"
 countries = gpd.read_file(url)
 
 # Keep Latin America by bounding box
 latam = countries.cx[-120:-30, -60:35].copy()
 
-# Prepare risk data
-cm_plot = cm_map.copy()
+# Copy mapping dataset
+cm_plot = cell_month.copy()
 
-if "risk_hat" not in cm_plot.columns:
-    cm_plot["risk_hat"] = logit_cell.predict(cm_plot)
+# Make sure year exists (required for C(year))
+if "year" not in cm_plot.columns and "year_month" in cm_plot.columns:
+    cm_plot["year_month"] = pd.PeriodIndex(cm_plot["year_month"], freq="M")
+    cm_plot["year"] = cm_plot["year_month"].dt.year
 
-cm_plot = cm_plot.dropna(subset=["risk_hat", "lat_grid", "lon_grid"])
+# Predict
+exog = cm_plot[["protest_count", "violence_count", "year"]].copy()
+cm_plot["risk_hat"] = logit_cell.predict(exog=exog)
+
+# Drop missing coords/preds for plotting
+cm_plot = cm_plot.dropna(subset=["lon_grid", "lat_grid", "risk_hat"])
 
 # Plot
 fig, ax = plt.subplots(figsize=(9, 7), dpi=300)
 
-# Country borders
 latam.boundary.plot(ax=ax, linewidth=0.7, color="black")
 
-# Risk heat points
 norm = Normalize(vmin=0, vmax=1)
-
 sc = ax.scatter(
     cm_plot["lon_grid"],
     cm_plot["lat_grid"],
     c=cm_plot["risk_hat"],
-    cmap="RdYlGn_r",   # green → yellow → red
+    cmap="RdYlGn_r",
     norm=norm,
     s=28,
     alpha=0.9,
@@ -700,22 +717,21 @@ cbar.set_label("Predicted probability of escalation (t+1)")
 
 ax.set_xlim(-120, -30)
 ax.set_ylim(-60, 35)
-
 ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
 ax.set_title("Predicted Escalation Risk by Sub-National Grid Cell")
 
 plt.tight_layout()
-plt.savefig("risk_map_with_country_borders.png", bbox_inches="tight")
+
+# Save to output folder (BEFORE show)
+OUTDIR = "../output"
+os.makedirs(OUTDIR, exist_ok=True)
+outpath = os.path.join(OUTDIR, "risk_map_gridcell.png")
+plt.savefig(outpath, dpi=300, bbox_inches="tight")
+
 plt.show()
 
-# Save to output folder
-OUTDIR = "../output"
-plt.savefig(
-    os.path.join(OUTDIR, "risk_map_gridcell.png"),
-    dpi=300,
-    bbox_inches="tight"
-)
+print(f"Saved map to: {outpath}")
 ```
 
 ```{python}
@@ -724,6 +740,8 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve
+
+df_events = df_event_level.dropna(subset=["latitude", "longitude", "event_date"]).copy()
 
 # 0) Make sure output folder exists
 OUTDIR = "../output"
@@ -734,7 +752,8 @@ results.to_csv(os.path.join(OUTDIR, "forecast_results_2015_2025.csv"), index=Fal
 # 2) Save performance metrics
 metrics = {
     "y_name": y_name,
-    "overall_rate": float(df[y_name].mean()),
+    "overall_rate": float(
+    pd.concat([y_train, y_valid, y_test]).mean()),
     "train_rows": int(len(train)),
     "valid_rows": int(len(valid)),
     "test_rows": int(len(test)),
@@ -812,4 +831,184 @@ false_positives.to_csv(os.path.join(OUTDIR, "false_positives_top10pct.csv"), ind
 print("Saved outputs to:", os.path.abspath(OUTDIR))
 print("Files:", sorted(os.listdir(OUTDIR)))
 
+```
 
+
+```{python}
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+import pandas as pd
+
+# standardize ALL predictors from the final model
+scaler = StandardScaler()
+X_train_std = scaler.fit_transform(X_train)
+
+# fit the same final logistic model, just on standardized predictors
+clf_std = LogisticRegression(
+    solver="liblinear",
+    class_weight="balanced",
+    max_iter=5000,
+    C=best_C
+)
+
+clf_std.fit(X_train_std, y_train)
+
+# get standardized coefficients from the FULL model
+coef_full = pd.Series(clf_std.coef_[0], index=X_train.columns)
+
+# keep only the variables you want in Table 5
+table5 = coef_full[[
+    "violence_count_lag1",
+    "protest_growth_dm",
+    "democracy_index_dm",
+    "inflation_lag1_dm"
+]].copy()
+
+print(table5)
+```
+
+```{python}
+# Threshold sensitivity analysis
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+import pandas as pd
+import numpy as np
+
+threshold_results = []
+
+for thresh in [1.25, 1.50, 2.00]:
+    
+    # copy full protest-month dataset BEFORE split
+    temp = df.copy()
+
+    # redefine escalation using onset OR proportional increase
+    temp["escalation"] = (
+        ((temp["violence_count"] == 0) & (temp["violence_count_t1"] > 0)) |
+        (temp["violence_count_t1"] >= thresh * temp["violence_count"])
+    ).astype(int)
+
+    # split again
+    train_s = temp[(temp["year_month"] >= pd.Period("2015-01", freq="M")) &
+                   (temp["year_month"] <= pd.Period("2022-12", freq="M"))].copy()
+
+    valid_s = temp[(temp["year_month"] >= pd.Period("2023-01", freq="M")) &
+                   (temp["year_month"] <= pd.Period("2023-12", freq="M"))].copy()
+
+    test_s  = temp[(temp["year_month"] >= pd.Period("2024-01", freq="M")) &
+                   (temp["year_month"] <= pd.Period("2025-12", freq="M"))].copy()
+
+    # keep only countries seen in train
+    train_countries = set(train_s["country"])
+    valid_s = valid_s[valid_s["country"].isin(train_countries)].copy()
+    test_s  = test_s[test_s["country"].isin(train_countries)].copy()
+
+    # one-hot encode region if needed
+    if "region" in train_s.columns:
+        train_s = pd.get_dummies(train_s, columns=["region"], drop_first=True)
+        valid_s = pd.get_dummies(valid_s, columns=["region"], drop_first=True)
+        test_s  = pd.get_dummies(test_s,  columns=["region"], drop_first=True)
+
+    region_dummies_s = [
+        c for c in train_s.columns
+        if c.startswith("region_") and c != "region_violence_mean"
+    ]
+
+    for c in region_dummies_s:
+        if c not in valid_s.columns:
+            valid_s[c] = 0
+        if c not in test_s.columns:
+            test_s[c] = 0
+
+    # macro missingness
+    for col in macro_cols:
+        train_s[col + "_missing"] = train_s[col].isna().astype(int)
+        valid_s[col + "_missing"] = valid_s[col].isna().astype(int)
+        test_s[col + "_missing"]  = test_s[col].isna().astype(int)
+
+    # demean using train means
+    train_means_s = train_s.groupby("country")[base_features].mean()
+
+    def apply_demean(split_df, means_df, cols):
+        out = split_df.copy()
+        for c in cols:
+            out[c + "_dm"] = out[c] - out["country"].map(means_df[c])
+        return out
+
+    train_s = apply_demean(train_s, train_means_s, base_features)
+    valid_s = apply_demean(valid_s, train_means_s, base_features)
+    test_s  = apply_demean(test_s,  train_means_s, base_features)
+
+    for col in macro_cols:
+        train_s[col + "_dm"] = train_s[col + "_dm"].fillna(0)
+        valid_s[col + "_dm"] = valid_s[col + "_dm"].fillna(0)
+        test_s[col + "_dm"]  = test_s[col + "_dm"].fillna(0)
+
+    features_s = (
+        [c + "_dm" for c in base_features] +
+        [c + "_missing" for c in macro_cols] +
+        extra_features +
+        region_dummies_s
+    )
+
+    # make sure dummy cols are ints
+    if len(region_dummies_s) > 0:
+        train_s[region_dummies_s] = train_s[region_dummies_s].astype(int)
+        valid_s[region_dummies_s] = valid_s[region_dummies_s].astype(int)
+        test_s[region_dummies_s]  = test_s[region_dummies_s].astype(int)
+
+    X_train_s = train_s[features_s]
+    y_train_s = train_s["escalation"]
+    X_valid_s = valid_s[features_s]
+    y_valid_s = valid_s["escalation"]
+    X_test_s  = test_s[features_s]
+    y_test_s  = test_s["escalation"]
+
+    # tune C on validation, same as your main model
+    C_grid = [0.01, 0.1, 1, 5, 10, 50]
+    best_auc_s = -1
+    best_C_s = C_grid[0]
+
+    for C_val in C_grid:
+        temp_model = LogisticRegression(
+            solver="liblinear",
+            class_weight="balanced",
+            max_iter=5000,
+            C=C_val
+        )
+        temp_model.fit(X_train_s, y_train_s)
+        valid_proba_s = temp_model.predict_proba(X_valid_s)[:, 1]
+        val_auc_s = roc_auc_score(y_valid_s, valid_proba_s)
+
+        if val_auc_s > best_auc_s:
+            best_auc_s = val_auc_s
+            best_C_s = C_val
+
+    # fit final model for this threshold
+    final_model_s = LogisticRegression(
+        solver="liblinear",
+        class_weight="balanced",
+        max_iter=5000,
+        C=best_C_s
+    )
+    final_model_s.fit(X_train_s, y_train_s)
+
+    test_proba_s = final_model_s.predict_proba(X_test_s)[:, 1]
+    test_auc_s = roc_auc_score(y_test_s, test_proba_s)
+
+    threshold_results.append({
+        "Threshold": thresh,
+        "Escalation Rate": round(temp["escalation"].mean(), 3),
+        "Test AUC": round(test_auc_s, 3)
+    })
+
+threshold_table = pd.DataFrame(threshold_results)
+
+# add interpretation column
+threshold_table["Interpretation"] = [
+    "Captures noise / minor variation",
+    "Balanced signal vs noise",
+    "Too restrictive, sparse positives"
+]
+
+print(threshold_table)
+```
