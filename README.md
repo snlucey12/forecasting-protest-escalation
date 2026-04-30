@@ -16,6 +16,12 @@ This project relies on three datasets:
 
 All datasets should be placed in a `data/` folder before running the analysis.
 
+No additional filtering is required at the download stage for the ACLED dataset,
+as all event classifications are constructed during data processing. While not
+necessary, restricting the download to "Central America" and "South America" in
+the location field can reduce file size and improve download and processing
+efficiency. Access to ACLED data requires an account, which can typically be obtained through an institutional or academic affiliation.
+
 ---
 
 ## Repository Structure
@@ -34,7 +40,7 @@ To reproduce the analysis:
 1. Download and place all required datasets in the `data/` folder  
 2. Run the data cleaning script:
 ```bash
-   quarto render code/datacleaning.qmd
+quarto render code/datacleaning.qmd
 ```
 3. Run the modeling script:
 ```bash
