@@ -1,0 +1,282 @@
+---
+title: data cleaning
+format: html
+execute:
+  python: "C:/Users/sonia/stat4915/4915env/Scripts/python.exe"
+---
+```{python}
+# LOADING LIBRARIES
+import pandas as pd
+import datetime as dt
+import wbdata
+```
+
+```{python}
+# 1) CLEAN ACLED EVENT-LEVEL DATA -> COUNTRY-MONTH PANEL
+
+df = pd.read_csv("../data/ACLEDdatauncleaned.csv")
+
+latin_america_countries = [
+    "Argentina","Bolivia","Brazil","Chile","Colombia","Costa Rica","Cuba",
+    "Dominican Republic","Ecuador","El Salvador","Guatemala","Haiti","Honduras",
+    "Mexico","Nicaragua","Panama","Paraguay","Peru","Uruguay","Venezuela"
+]
+
+df["event_date"] = pd.to_datetime(df["event_date"], errors="coerce")
+df = df.dropna(subset=["event_date"])
+
+df = df[(df["event_date"].dt.year >= 2015) & (df["event_date"].dt.year <= 2025)].copy()
+
+df["year_month"] = df["event_date"].dt.to_period("M").astype(str)
+
+df["country"] = (df["country"].astype(str)
+                 .str.replace("\u00a0", " ", regex=False)
+                 .str.replace(r"\s+", " ", regex=True)
+                 .str.strip())
+
+df = df[df["country"].isin(latin_america_countries)].copy()
+
+df["is_protest"] = (df["event_type"] == "Protests").astype(int)
+df["is_escalation_event"] = df["event_type"].isin(["Riots", "Violence against civilians"]).astype(int)
+
+panel = (
+    df.groupby(["country", "year_month"], as_index=False)
+      .agg(
+          protest_count=("is_protest", "sum"),
+          protest_any=("is_protest", "max"),
+          violence_count=("is_escalation_event", "sum"),
+          violence_any=("is_escalation_event", "max"),
+          fatalities=("fatalities", "sum"),
+          protest_days=("event_date", lambda x: x[df.loc[x.index, "is_protest"].eq(1)].nunique())
+      )
+)
+
+
+panel["year_month"] = pd.PeriodIndex(panel["year_month"], freq="M")
+panel = panel.sort_values(["country", "year_month"]).reset_index(drop=True)
+
+panel["violence_any_t1"] = panel.groupby("country")["violence_any"].shift(-1)
+panel["violence_count_t1"] = panel.groupby("country")["violence_count"].shift(-1)
+
+panel["escalation"] = ((panel["protest_any"] == 1) & (panel["violence_any_t1"] == 1)).astype(int)
+
+# Restrict to protest months only (your design)
+panel = panel[panel["protest_any"] == 1].copy()
+
+panel["protest_count_t_1"] = panel.groupby("country")["protest_count"].shift(1)
+panel["protest_growth"] = panel["protest_count"] - panel["protest_count_t_1"]
+panel["recent_violence"] = (
+    (panel["violence_any"] == 1) | (panel.groupby("country")["violence_any"].shift(1) == 1)
+).astype(int)
+
+panel["year"] = panel["year_month"].dt.year.astype(int)
+
+# Clean country strings (ACLED)
+panel["country"] = (panel["country"].astype(str)
+                    .str.replace("\u00a0", " ", regex=False)
+                    .str.replace(r"\s+", " ", regex=True)
+                    .str.strip())
+
+```
+
+```{python}
+# Sort properly
+panel = panel.sort_values(["country", "year_month"])
+
+# Create country-level means
+country_means = panel.groupby("country").transform("mean")
+
+# Demean dynamic predictors
+panel["protest_count_dm"] = panel["protest_count"] - country_means["protest_count"]
+panel["protest_growth_dm"] = panel["protest_growth"] - country_means["protest_growth"]
+panel["recent_violence_dm"] = panel["recent_violence"] - country_means["recent_violence"]
+panel["protest_count_t_2"] = panel.groupby("country")["protest_count"].shift(2)
+
+panel["protest_acceleration"] = (
+    panel["protest_count"] 
+    - 2 * panel["protest_count_t_1"] 
+    + panel["protest_count_t_2"]
+)
+variation = panel.groupby("country")["escalation"].nunique()
+
+countries_with_variation = variation[variation > 1].index
+
+panel_model = panel[panel["country"].isin(countries_with_variation)]
+
+```
+
+```{python}
+# 2) CLEAN DEMOCRACY INDEX DATA (LATIN AMERICA YEAR >= 2018)
+df3 = pd.read_csv("../data/democracyindex.csv")
+df3.columns = df3.columns.str.strip()
+
+dem = df3[(df3["Year"] >= 2015) & (df3["Year"] <= 2025)].copy()
+
+dem = dem.rename(columns={
+    "Entity": "country",
+    "Year": "year",
+    "Democracy Index": "democracy_index"
+})
+
+dem["year"] = dem["year"].astype(int)
+
+dem["country"] = (dem["country"].astype(str)
+                  .str.replace("\u00a0", " ", regex=False)
+                  .str.replace(r"\s+", " ", regex=True)
+                  .str.strip())
+
+# KEEP ONLY LATAM COUNTRIES
+dem = dem[dem["country"].isin(latin_america_countries)].copy()
+```
+
+```{python}
+# 3) MERGE DEMOCRACY ONTO FILTERED PANEL
+panel2 = panel.merge(
+    dem[["country", "year", "democracy_index"]],
+    on=["country", "year"],
+    how="left"
+)
+
+print("Panel rows (protest months only):", len(panel2))
+print("Escalations:", int(panel2["escalation"].sum()))
+print("Escalation rate:", round(panel2["escalation"].mean() * 100, 2), "%")
+print("Missing democracy_index after merge:", int(panel2["democracy_index"].isna().sum()))
+
+# Convert year_month back to string & save
+panel2["year_month"] = panel2["year_month"].astype(str)
+panel2.to_csv("../data/ACLEDcleaned.csv", index=False)
+```
+
+
+
+```{python}
+#4) clean GINI data
+
+gini_wide = pd.read_excel("../data/gini-indexuncleaned.xlsx")
+
+
+# keep only Middle East
+gini_wide = gini_wide[gini_wide["Country Name"].isin(latin_america_countries)].copy()
+
+# grab year columns whether they are ints or strings
+year_cols = [c for c in gini_wide.columns if str(c).isdigit() and 2015 <= int(c) <= 2025]
+
+
+gini = gini_wide.melt(
+    id_vars=["Country Name", "Country Code", "Indicator Name", "Indicator Code"],
+    value_vars=year_cols,
+    var_name="year",
+    value_name="gini"
+)
+
+gini = gini.rename(columns={"Country Name": "country"})
+gini["year"] = gini["year"].astype(int)
+
+# clean country names
+gini["country"] = (gini["country"].astype(str)
+                   .str.replace("\u00a0", " ", regex=False)
+                   .str.replace(r"\s+", " ", regex=True)
+                   .str.strip())
+
+gini.head()
+```
+
+
+```{python}
+## 5) CLEAN WORLD BANK DATA
+indicators = {
+    "FP.CPI.TOTL.ZG": "inflation",
+    "NY.GDP.MKTP.KD.ZG": "gdp_growth",
+    "SL.UEM.TOTL.ZS": "unemployment"
+}
+
+wdi = wbdata.get_dataframe(
+    indicators,
+    date=("2015", "2025")
+)
+
+
+wdi = wdi.reset_index().rename(columns={"date": "year"})
+wdi["year"] = wdi["year"].astype(int)
+
+# Clean country names (match ACLED & democracy)
+wdi["country"] = (wdi["country"].astype(str)
+                  .str.replace("\u00a0", " ", regex=False)
+                  .str.replace(r"\s+", " ", regex=True)
+                  .str.strip())
+
+print(wdi.head())
+
+wdi = wdi[wdi["country"].isin(latin_america_countries)].copy()
+
+# Merge WDI onto panel2
+panel3 = panel2.merge(
+    wdi[["country", "year", "inflation", "gdp_growth", "unemployment"]],
+    on=["country", "year"],
+    how="left"
+)
+# Find Missing Data
+print("Missing inflation:", panel3["inflation"].isna().sum())
+print("Missing gdp_growth:", panel3["gdp_growth"].isna().sum())
+print("Missing unemployment:", panel3["unemployment"].isna().sum())
+
+
+# Create lagged variables
+panel3 = panel3.sort_values(["country", "year_month"]).reset_index(drop=True)
+
+for col in ["inflation", "gdp_growth", "unemployment"]:
+    panel3[f"{col}_lag1"] = panel3.groupby("country")[col].shift(1)
+```
+```{python}
+# 6) MERGE ALL DATA
+panel4 = panel3.merge(
+    gini[["country", "year", "gini"]],
+    on=["country", "year"],
+    how="left"
+)
+panel4.to_csv("../data/mergedcleaned.csv", index=False)
+print("Saved: mergedcleaned.csv")
+```
+
+
+```{python}
+# Save event-level data with coordinates for sub-national modeling
+
+df_event_level = pd.read_csv("../data/ACLED_event_level_with_coords.csv")
+
+# (Optional) ensure proper date format
+df_event_level["event_date"] = pd.to_datetime(
+    df_event_level["event_date"], errors="coerce"
+)
+
+# If year_month was saved as string, convert back to Period
+if "year_month" in df_event_level.columns:
+    df_event_level["year_month"] = pd.PeriodIndex(
+        df_event_level["year_month"], freq="M"
+    )
+
+print("Event-level data loaded successfully.")
+print(df_event_level.columns)
+
+df_event_level = df[[
+    "event_date",
+    "year_month",
+    "country",
+    "latitude",
+    "longitude",
+    "event_type",
+    "fatalities",
+    "is_protest",
+    "is_escalation_event"
+]].copy()
+
+df_event_level.to_csv("../data/ACLED_event_level_with_coords.csv", index=False)
+
+print("Saved event-level data with coordinates.")
+```
+
+
+
+## SL note: use dataset "mergedcleaned.csv" for analysis in later sections.
+
+## SL note: use "ACLED_event_level_with_coords.csv" for any sub-national modeling or geospatial analysis.
