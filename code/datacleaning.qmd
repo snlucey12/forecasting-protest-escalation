@@ -241,6 +241,23 @@ print("Saved: mergedcleaned.csv")
 
 ```{python}
 # Save event-level data with coordinates for sub-national modeling
+
+df_event_level = pd.read_csv("../data/ACLED_event_level_with_coords.csv")
+
+# (Optional) ensure proper date format
+df_event_level["event_date"] = pd.to_datetime(
+    df_event_level["event_date"], errors="coerce"
+)
+
+# If year_month was saved as string, convert back to Period
+if "year_month" in df_event_level.columns:
+    df_event_level["year_month"] = pd.PeriodIndex(
+        df_event_level["year_month"], freq="M"
+    )
+
+print("Event-level data loaded successfully.")
+print(df_event_level.columns)
+
 df_event_level = df[[
     "event_date",
     "year_month",
@@ -257,6 +274,8 @@ df_event_level.to_csv("../data/ACLED_event_level_with_coords.csv", index=False)
 
 print("Saved event-level data with coordinates.")
 ```
+
+
 
 ## SL note: use dataset "mergedcleaned.csv" for analysis in later sections.
 
