@@ -106,7 +106,7 @@ panel_model = panel[panel["country"].isin(countries_with_variation)]
 ```
 
 ```{python}
-# 2) CLEAN DEMOCRACY INDEX DATA (LATIN AMERICA YEAR >= 2018)
+# 2) CLEAN DEMOCRACY INDEX DATA (LATIN AMERICA YEAR >= 2015)
 df3 = pd.read_csv("../data/democracyindex.csv")
 df3.columns = df3.columns.str.strip()
 
@@ -155,7 +155,7 @@ panel2.to_csv("../data/ACLEDcleaned.csv", index=False)
 gini_wide = pd.read_excel("../data/gini-indexuncleaned.xlsx")
 
 
-# keep only Middle East
+# keep only Latin America
 gini_wide = gini_wide[gini_wide["Country Name"].isin(latin_america_countries)].copy()
 
 # grab year columns whether they are ints or strings
@@ -195,7 +195,6 @@ wdi = wbdata.get_dataframe(
     date=("2015", "2025")
 )
 
-
 wdi = wdi.reset_index().rename(columns={"date": "year"})
 wdi["year"] = wdi["year"].astype(int)
 
@@ -219,7 +218,6 @@ panel3 = panel2.merge(
 print("Missing inflation:", panel3["inflation"].isna().sum())
 print("Missing gdp_growth:", panel3["gdp_growth"].isna().sum())
 print("Missing unemployment:", panel3["unemployment"].isna().sum())
-
 
 # Create lagged variables
 panel3 = panel3.sort_values(["country", "year_month"]).reset_index(drop=True)
@@ -274,7 +272,6 @@ df_event_level.to_csv("../data/ACLED_event_level_with_coords.csv", index=False)
 
 print("Saved event-level data with coordinates.")
 ```
-
 
 
 ## SL note: use dataset "mergedcleaned.csv" for analysis in later sections.
